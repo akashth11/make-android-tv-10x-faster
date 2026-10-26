@@ -556,6 +556,18 @@ public final class Home extends Activity {
                         if (below != null) return below;
                     }
                 }
+                if (direction == View.FOCUS_UP && apps != null && apps.tiles().indexOfChild(focused) >= 0) {
+                    if (inputs != null && inputs.tiles().getChildCount() > 0) {
+                        View above = nearest(inputs.tiles(), focused);
+                        if (above != null) return above;
+                    }
+                }
+                if (direction == View.FOCUS_DOWN && inputs != null && inputs.tiles().indexOfChild(focused) >= 0) {
+                    if (apps != null && apps.tiles().getChildCount() > 0) {
+                        View below = nearest(apps.tiles(), focused);
+                        if (below != null) return below;
+                    }
+                }
                 return super.focusSearch(focused, direction);
             }
         };
@@ -807,14 +819,15 @@ public final class Home extends Activity {
         });
     }
 
-    private void updateAppsRowScale(Tile focusedTile) {
-        if (apps == null) return;
-        ViewGroup tiles = apps.tiles();
+    private void updateRowScale(Row row, Tile focusedTile) {
+        if (row == null) return;
+        ViewGroup tiles = row.tiles();
+        if (tiles == null) return;
         boolean rowHasFocus = focusedTile != null && focusedTile.getParent() == tiles;
         for (int i = 0; i < tiles.getChildCount(); i++) {
             View child = tiles.getChildAt(i);
             if (child instanceof Tile) {
-                ((Tile) child).setAppRowFocusState(child == focusedTile, rowHasFocus);
+                ((Tile) child).setRowFocusState(child == focusedTile, rowHasFocus);
             }
         }
     }
@@ -833,8 +846,8 @@ public final class Home extends Activity {
         List<Item> shown = enabled ? Catalog.visible(cfg, row.kind, row.all, recentFor(row.kind))
                 : new ArrayList<>();
         int[] size = cardSize();
-        int w = Catalog.APPS.equals(row.kind) ? size[0] : dp(128);
-        int h = Catalog.APPS.equals(row.kind) ? size[1] : dp(38);
+        int w = Catalog.APPS.equals(row.kind) ? size[0] : dp(78);
+        int h = Catalog.APPS.equals(row.kind) ? size[1] : dp(28);
         String labels = cfg.get(Config.LABELS);
         int accent = cfg.accent();
         int index = 0, restore = -1;
@@ -842,16 +855,14 @@ public final class Home extends Activity {
             Tile t = new Tile(this, it, row.kind, Catalog.label(cfg, it), w, h, labels, accent);
             t.setOnClickListener(v -> open((Tile) v));
             t.setOnFocusChangeListener((v, has) -> {
-                if (Catalog.APPS.equals(row.kind)) {
-                    if (has) {
-                        updateAppsRowScale((Tile) v);
-                    } else {
-                        v.post(() -> {
-                            if (apps != null && !apps.tiles().hasFocus()) {
-                                updateAppsRowScale(null);
-                            }
-                        });
-                    }
+                if (has) {
+                    updateRowScale(row, (Tile) v);
+                } else {
+                    v.post(() -> {
+                        if (row != null && !row.tiles().hasFocus()) {
+                            updateRowScale(row, null);
+                        }
+                    });
                 }
                 if (has) focusBackground(((Tile) v).item);
             });

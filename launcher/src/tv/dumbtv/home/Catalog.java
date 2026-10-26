@@ -120,12 +120,16 @@ final class Catalog {
         List<Item> other = new ArrayList<>();
         for (TvInputInfo in : tv.getTvInputList()) {
             if (!in.isPassthroughInput() || in.isHidden(c)) continue;
-            CharSequence label = in.loadCustomLabel(c);
+            int state = tv.getInputState(in.getId());
+            CharSequence label = null;
+            if (state == TvInputManager.INPUT_STATE_CONNECTED) {
+                label = in.loadCustomLabel(c);
+            }
             if (TextUtils.isEmpty(label)) label = in.loadLabel(c);
             Intent view = new Intent(Intent.ACTION_VIEW,
                     TvContract.buildChannelUriForPassthroughInput(in.getId()));
             Item it = new Item(in.getId(), label, view);
-            it.state = tv.getInputState(in.getId());
+            it.state = state;
             (in.getType() == TvInputInfo.TYPE_HDMI ? out : other).add(it);
         }
         Collator collator = Collator.getInstance();
@@ -136,6 +140,9 @@ final class Catalog {
     }
 
     static CharSequence label(Config cfg, Item it) {
+        if (it.state != TvInputManager.INPUT_STATE_CONNECTED) {
+            return it.label;
+        }
         return cfg.get("name." + it.id, it.label.toString());
     }
 
