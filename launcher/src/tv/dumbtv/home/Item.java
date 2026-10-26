@@ -16,6 +16,10 @@ final class Item {
     volatile Drawable banner, icon;
     volatile int backgroundColor;
     volatile boolean colorRequested;
+    String contentTitle;
+    String appName;
+    String contentArtPath;
+    int progressPercent = -1;
 
     Item(String id, CharSequence label, Intent intent) {
         this.id = id;

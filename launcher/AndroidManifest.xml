@@ -7,6 +7,8 @@
 
     <!-- Fire OS 6 only: the Keeper reads the foreground package through UsageStats.
          maxSdkVersion keeps Fire OS 7/8 on the permission-free accessibility path. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
         android:maxSdkVersion="27" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"

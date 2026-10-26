@@ -7,6 +7,7 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
 import android.util.TypedValue;
+import android.view.View;
 import android.widget.TextView;
 
 final class Ui {
@@ -46,13 +47,15 @@ final class Ui {
     }
 
     /** Accent fill when focused, a faint fill otherwise. */
-    static void focusStyle(TextView v, int accent, int idle, float radius) {
+    static void focusStyle(View v, int accent, int idle, float radius) {
         StateListDrawable bg = new StateListDrawable();
         bg.addState(new int[] {android.R.attr.state_focused}, round(accent, radius));
         bg.addState(new int[0], round(idle, radius));
         v.setBackground(bg);
-        v.setTextColor(new ColorStateList(
-                new int[][] {{android.R.attr.state_focused}, {}},
-                new int[] {ink(accent), 0xD9FFFFFF}));
+        if (v instanceof TextView) {
+            ((TextView) v).setTextColor(new ColorStateList(
+                    new int[][] {{android.R.attr.state_focused}, {}},
+                    new int[] {ink(accent), 0xD9FFFFFF}));
+        }
     }
 }

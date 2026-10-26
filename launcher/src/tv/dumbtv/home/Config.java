@@ -65,9 +65,9 @@ final class Config {
     static final Choice LAYOUT = new Choice("layout", "Layout", "rows",
             new String[] {"rows", "grid"},
             new String[] {"Rows", "Grid"});
-    static final Choice ORDER = new Choice("order", "App order", "custom",
-            new String[] {"custom", "recent"},
-            new String[] {"Your order", "Recently used"});
+    static final Choice ORDER = new Choice("order", "App order", "recent",
+            new String[] {"recent", "custom"},
+            new String[] {"Recently used", "Your order"});
     static final Choice LABELS = new Choice("labels", "App names", "focus",
             new String[] {"focus", "always", "never"},
             new String[] {"On focus", "Always", "Never"});
@@ -84,14 +84,14 @@ final class Config {
     static final Choice SWITCH = new Choice("switch", "Open inputs with", "auto",
             new String[] {"auto", "tv", "home"},
             new String[] {"Automatic", "The TV's app", "dumbtv home"});
-    static final Choice BACKGROUND = new Choice("background", "Background", "black",
+    static final Choice BACKGROUND = new Choice("background", "Background", "image",
             new String[] {"black", "graphite", "midnight", "image", "adaptive", "adaptive-tint"},
             new String[] {"Black", "Graphite", "Midnight", "Image file", "Adaptive solid", "Adaptive wallpaper tint"});
-    static final Choice DIM = new Choice("dim", "Image dim", "40",
+    static final Choice DIM = new Choice("dim", "Image dim", "20",
             new String[] {"0", "20", "40", "60", "80"},
             new String[] {"0%", "20%", "40%", "60%", "80%"});
 
-    static final Choice ROTATE = new Choice("rotate", "Wallpaper rotation", "off",
+    static final Choice ROTATE = new Choice("rotate", "Wallpaper rotation", "visit",
             new String[] {"off", "visit", "hourly", "daily", "daytime"},
             new String[] {"Off", "Every return home", "Every hour", "Every day", "By time of day"});
 

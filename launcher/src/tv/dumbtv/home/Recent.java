@@ -26,9 +26,17 @@ final class Recent {
         prefs(c).edit().putLong(pkg, System.currentTimeMillis()).apply();
     }
 
-    /** Last-used time per package. Does a binder call: call off the UI thread. */
+    /** Last-used and frequency score per package. Does a binder call: call off the UI thread. */
     static Map<String, Long> times(Context c) {
         Map<String, Long> out = new HashMap<>();
+        // Seed default high-frequency streaming apps so they are easily accessible on the left
+        long base = System.currentTimeMillis() - (7L * 24 * 60 * 60 * 1000L);
+        out.put("com.google.android.youtube.tv", base + 5000000L);
+        out.put("in.startv.hotstar", base + 4000000L);
+        out.put("com.netflix.ninja", base + 3000000L);
+        out.put("com.blinkboard.app", base + 2000000L);
+        out.put("com.amazon.amazonvideo.livingroom", base + 1000000L);
+
         for (Map.Entry<String, ?> e : prefs(c).getAll().entrySet()) {
             if (e.getValue() instanceof Long) out.put(e.getKey(), (Long) e.getValue());
         }
@@ -36,11 +44,13 @@ final class Recent {
         if (usage == null) return out;
         long now = System.currentTimeMillis();
         try {
-            // Without usage access this returns an empty map rather than throwing.
             for (UsageStats s : usage.queryAndAggregateUsageStats(now - WINDOW_MS, now).values()) {
+                long last = s.getLastTimeUsed();
+                long totalFg = s.getTotalTimeInForeground();
+                long score = last + (totalFg > 0 ? Math.min(totalFg * 1000L, 30L * 24 * 60 * 60 * 1000L) : 0);
                 Long seen = out.get(s.getPackageName());
-                if (s.getLastTimeUsed() > (seen == null ? 0 : seen)) {
-                    out.put(s.getPackageName(), s.getLastTimeUsed());
+                if (score > (seen == null ? 0 : seen)) {
+                    out.put(s.getPackageName(), score);
                 }
             }
         } catch (RuntimeException ignored) {

@@ -2,15 +2,21 @@ package tv.dumbtv.home;
 
 import android.animation.ValueAnimator;
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.Rect;
 import android.media.tv.TvInputManager;
 import android.net.Uri;
@@ -57,18 +63,19 @@ public final class Home extends Activity {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final ExecutorService colorIo = Executors.newSingleThreadExecutor();
-    private final List<TextView> chips = new ArrayList<>();
+    private final List<View> chips = new ArrayList<>();
     private Config cfg;
     private TvInputManager tv;
     private int applied = -1, appsGeneration;
     private boolean resumed, landed, unlockOpened;
     private FrameLayout root;
-    private ImageView wall;
+    private ImageView wallBack, wall;
     private View shade;
     private View tint;
-    private TextView clock, date;
+    private TextView greeting, clock, date, freeRamLabel;
     private Meter meter;
     private Row apps, inputs;
+    private ValueAnimator ambientAnim;
     private Map<String, Long> recent = new HashMap<>();
     private Tile moving;
     private String wallKey;
@@ -76,6 +83,27 @@ public final class Home extends Activity {
     private ValueAnimator colorAnimation;
     private int displayedColor, targetColor;
     private boolean tintWallpaper;
+    private int cycleCount;
+
+    private final Runnable wallpaperCycler = new Runnable() {
+        @Override
+        public void run() {
+            if (!resumed) return;
+            List<File> list = cfg.wallpapers();
+            if (list.size() > 1) {
+                cfg.nextWallpaper();
+                background();
+            }
+            if (++cycleCount % 2 == 0) {
+                File wDir = new File(cfg.dir, Config.WALLPAPERS);
+                WallpaperFetcher.fetchRandom(Home.this, wDir, () -> ui.post(() -> {
+                    cfg.nextWallpaper();
+                    background();
+                }));
+            }
+            ui.postDelayed(this, 25000);
+        }
+    };
 
     private final BroadcastReceiver packages = new BroadcastReceiver() {
         @Override
@@ -125,14 +153,14 @@ public final class Home extends Activity {
         Row(String kind, String name, LinearLayout parent) {
             this.kind = kind;
             int edge = dp(56), bleed = dp(14);
-            title = Ui.text(Home.this, 12, Ui.FAINT, Ui.MEDIUM);
+            title = Ui.text(Home.this, 11, Ui.FAINT, Ui.MEDIUM);
             title.setText(name.toUpperCase(Locale.ROOT));
             title.setLetterSpacing(0.14f);
-            title.setPadding(edge, dp(20), edge, dp(2));
+            title.setPadding(edge, dp(10), edge, dp(2));
             strip = new LinearLayout(Home.this);
             strip.setClipChildren(false);
             strip.setClipToPadding(false);
-            strip.setPadding(bleed, dp(12), bleed, dp(8));
+            strip.setPadding(bleed, dp(6), bleed, dp(6));
             scroll = new HorizontalScrollView(Home.this) {
                 /** Keeps the focused tile centered, except near either end of the row. */
                 @Override
@@ -151,7 +179,7 @@ public final class Home extends Activity {
             scroll.setPadding(edge - bleed, 0, edge - bleed, 0);
             scroll.addView(strip, new FrameLayout.LayoutParams(WRAP, WRAP));
             grid = new Grid(Home.this);
-            grid.setPadding(edge, dp(12), edge, dp(8));
+            grid.setPadding(edge, dp(6), edge, dp(6));
             parent.addView(title, new LinearLayout.LayoutParams(MATCH, WRAP));
             parent.addView(scroll, new LinearLayout.LayoutParams(MATCH, WRAP));
             parent.addView(grid, new LinearLayout.LayoutParams(MATCH, WRAP));
@@ -173,6 +201,7 @@ public final class Home extends Activity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         Future<List<Item>> catalog = io.submit(() -> Catalog.apps(this));
         cfg = Config.get(this);
         Future<Map<String, Long>> times = recentFor(Catalog.APPS) == null ? null
@@ -228,6 +257,10 @@ public final class Home extends Activity {
         if (cfg.version() != applied) apply();
         else background();
         refreshRecent();
+        startAmbientWallpaperAnimation();
+        updateFreeRamText();
+        ui.removeCallbacks(wallpaperCycler);
+        ui.postDelayed(wallpaperCycler, 20000);
         IntentFilter f = new IntentFilter(Intent.ACTION_TIME_TICK);
         f.addAction(Intent.ACTION_TIME_CHANGED);
         f.addAction(Intent.ACTION_TIMEZONE_CHANGED);
@@ -244,6 +277,8 @@ public final class Home extends Activity {
     protected void onPause() {
         super.onPause();
         resumed = false;
+        ui.removeCallbacks(wallpaperCycler);
+        stopAmbientWallpaperAnimation();
         stopColorAnimation();
         targetColor = 0;
         unregisterReceiver(time);
@@ -290,6 +325,10 @@ public final class Home extends Activity {
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent e) {
+        if (e.getAction() == KeyEvent.ACTION_DOWN) {
+            int code = e.getKeyCode();
+            if (handleHotKey(code)) return true;
+        }
         if (moving == null) return super.dispatchKeyEvent(e);
         if (e.getAction() == KeyEvent.ACTION_DOWN) {
             switch (e.getKeyCode()) {
@@ -314,8 +353,46 @@ public final class Home extends Activity {
         return true;
     }
 
+    private boolean launchPackage(String pkg) {
+        try {
+            Intent intent = getPackageManager().getLeanbackLaunchIntentForPackage(pkg);
+            if (intent == null) intent = getPackageManager().getLaunchIntentForPackage(pkg);
+            if (intent != null) {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+                startActivity(intent);
+                return true;
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    private boolean handleHotKey(int code) {
+        switch (code) {
+            case 193: // Xiaomi / Android TV Netflix key
+            case KeyEvent.KEYCODE_BUTTON_1:
+            case KeyEvent.KEYCODE_PROG_RED:
+                return launchPackage("com.netflix.ninja");
+            case 194: // Xiaomi / Android TV Prime Video key
+            case KeyEvent.KEYCODE_BUTTON_2:
+            case KeyEvent.KEYCODE_PROG_GREEN:
+                return launchPackage("com.amazon.amazonvideo.livingroom")
+                        || launchPackage("com.amazon.avod.thirdpartyclient");
+            case 192: // Xiaomi / Android TV Hotstar key
+            case KeyEvent.KEYCODE_BUTTON_3:
+            case KeyEvent.KEYCODE_PROG_YELLOW:
+                return launchPackage("in.startv.hotstar");
+            case 195: // Xiaomi / Android TV YouTube key
+            case KeyEvent.KEYCODE_BUTTON_4:
+            case KeyEvent.KEYCODE_PROG_BLUE:
+                return launchPackage("com.google.android.youtube.tv");
+            default:
+                return false;
+        }
+    }
+
     @Override
     public boolean onKeyDown(int code, KeyEvent e) {
+        if (handleHotKey(code)) return true;
         if (code == KeyEvent.KEYCODE_MENU && locked()) {
             // Repeats keep arriving while the button is held; the first one past the hold opens it.
             if (e.getRepeatCount() == 0) {
@@ -358,7 +435,8 @@ public final class Home extends Activity {
      */
     private List<int[]> rowBlocks(View content) {
         List<int[]> rows = new ArrayList<>();
-        for (Row row : new Row[] {apps, inputs}) {
+        for (Row row : new Row[] {inputs, apps}) {
+            if (row == null) continue;
             if (row.scroll.getVisibility() == View.VISIBLE) {
                 rows.add(new int[] {topIn(row.title, content), topIn(row.scroll, content) + row.scroll.getHeight()});
             } else if (row.grid.getVisibility() == View.VISIBLE) {
@@ -417,6 +495,10 @@ public final class Home extends Activity {
 
     private View build() {
         root = new FrameLayout(this);
+        root.setKeepScreenOn(true);
+        wallBack = new ImageView(this);
+        wallBack.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        root.addView(wallBack, new FrameLayout.LayoutParams(MATCH, MATCH));
         wall = new ImageView(this);
         wall.setScaleType(ImageView.ScaleType.CENTER_CROP);
         root.addView(wall, new FrameLayout.LayoutParams(MATCH, MATCH));
@@ -467,8 +549,12 @@ public final class Home extends Activity {
             @Override
             public View focusSearch(View focused, int direction) {
                 if (direction == View.FOCUS_DOWN && chips.contains(focused)) {
-                    View below = nearest(apps.tiles(), focused);
-                    if (below != null) return below;
+                    ViewGroup target = (inputs != null && inputs.tiles().getChildCount() > 0)
+                            ? inputs.tiles() : (apps != null ? apps.tiles() : null);
+                    if (target != null) {
+                        View below = nearest(target, focused);
+                        if (below != null) return below;
+                    }
                 }
                 return super.focusSearch(focused, direction);
             }
@@ -476,34 +562,41 @@ public final class Home extends Activity {
         column.setOrientation(LinearLayout.VERTICAL);
         column.setClipChildren(false);
         column.setClipToPadding(false);
-        column.setPadding(0, dp(40), 0, dp(32));
-        scroll.addView(column, new FrameLayout.LayoutParams(MATCH, WRAP));
+        column.setPadding(0, dp(28), 0, dp(24));
+        scroll.addView(column, new FrameLayout.LayoutParams(MATCH, MATCH));
 
         LinearLayout head = new LinearLayout(this);
         head.setClipChildren(false);
         head.setClipToPadding(false);
         head.setGravity(Gravity.TOP);
-        head.setPadding(dp(56), 0, dp(56), dp(12));
+        head.setPadding(dp(56), 0, dp(56), dp(8));
         LinearLayout when = new LinearLayout(this);
         when.setOrientation(LinearLayout.VERTICAL);
-        clock = Ui.text(this, 52, Ui.TEXT, Ui.LIGHT);
-        date = Ui.text(this, 15, Ui.MUTED, Ui.MEDIUM);
-        date.setPadding(dp(2), dp(8), 0, 0);
+        greeting = Ui.text(this, 13, Ui.MUTED, Ui.MEDIUM);
+        greeting.setLetterSpacing(0.12f);
+        greeting.setPadding(dp(2), 0, 0, dp(4));
+        when.addView(greeting);
+        clock = Ui.text(this, 50, Ui.TEXT, Ui.LIGHT);
+        date = Ui.text(this, 14, Ui.MUTED, Ui.MEDIUM);
+        date.setPadding(dp(2), dp(6), 0, 0);
         when.addView(clock);
         when.addView(date);
         meter = new Meter(this);
         meter.setVisibility(View.GONE);
         LinearLayout.LayoutParams under = new LinearLayout.LayoutParams(WRAP, WRAP);
-        under.topMargin = dp(12);
+        under.topMargin = dp(10);
         under.leftMargin = dp(2);
         when.addView(meter, under);
         head.addView(when, new LinearLayout.LayoutParams(0, WRAP, 1f));
-        head.addView(chip("Options", v -> startActivity(new Intent(this, Options.class))));
-        head.addView(chip("Settings", v -> openSettings()));
+        head.addView(rocketChip(v -> boostMemory()));
+        head.addView(iconChip("⚙", v -> openSettings()));
         column.addView(head, new LinearLayout.LayoutParams(MATCH, WRAP));
 
-        apps = new Row(Catalog.APPS, "Apps", column);
+        View spacer = new View(this);
+        column.addView(spacer, new LinearLayout.LayoutParams(MATCH, 0, 1f));
+
         inputs = new Row(Catalog.INPUTS, "Inputs", column);
+        apps = new Row(Catalog.APPS, "Apps", column);
         return root;
     }
 
@@ -543,21 +636,110 @@ public final class Home extends Activity {
         return "on".equals(cfg.get(Config.LOCK));
     }
 
-    private TextView chip(String label, View.OnClickListener click) {
-        TextView v = Ui.text(this, 14, Ui.TEXT, Ui.MEDIUM);
-        v.setText(label);
+    private static final class RocketView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path path = new Path();
+
+        RocketView(Context c) {
+            super(c);
+            paint.setColor(0xFFF2F2F3);
+            paint.setStyle(Paint.Style.FILL);
+        }
+
+        @Override
+        protected void onMeasure(int widthSpec, int heightSpec) {
+            int size = Ui.dp(getContext(), 13);
+            setMeasuredDimension(size, size);
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float w = getWidth(), h = getHeight();
+            float cx = w / 2f;
+            path.reset();
+            path.moveTo(cx, h * 0.08f);
+            path.cubicTo(cx + w * 0.38f, h * 0.32f, cx + w * 0.30f, h * 0.68f, cx + w * 0.18f, h * 0.82f);
+            path.lineTo(cx + w * 0.44f, h * 0.92f);
+            path.lineTo(cx + w * 0.22f, h * 0.90f);
+            path.lineTo(cx + w * 0.14f, h * 0.84f);
+            path.lineTo(cx - w * 0.14f, h * 0.84f);
+            path.lineTo(cx - w * 0.22f, h * 0.90f);
+            path.lineTo(cx - w * 0.44f, h * 0.92f);
+            path.lineTo(cx - w * 0.18f, h * 0.82f);
+            path.cubicTo(cx - w * 0.30f, h * 0.68f, cx - w * 0.38f, h * 0.32f, cx, h * 0.08f);
+            path.close();
+            canvas.drawPath(path, paint);
+
+            Paint window = new Paint(Paint.ANTI_ALIAS_FLAG);
+            window.setColor(0xFF141518);
+            canvas.drawCircle(cx, h * 0.40f, w * 0.10f, window);
+        }
+    }
+
+    private void updateFreeRamText() {
+        if (freeRamLabel == null) return;
+        ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+        if (am == null) return;
+        ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+        am.getMemoryInfo(mi);
+        long freeMb = mi.availMem / (1024 * 1024);
+        String text = freeMb >= 1024
+                ? String.format(Locale.ROOT, "%.1f GB", freeMb / 1024.0f)
+                : (freeMb + " MB");
+        freeRamLabel.setText(text);
+    }
+
+    private View rocketChip(View.OnClickListener click) {
+        LinearLayout v = new LinearLayout(this);
+        v.setOrientation(LinearLayout.VERTICAL);
         v.setGravity(Gravity.CENTER);
-        v.setPadding(dp(18), dp(9), dp(18), dp(9));
+        v.setPadding(dp(8), dp(3), dp(8), dp(3));
+        v.setFocusable(true);
+        v.setClickable(true);
+        v.setOnClickListener(click);
+
+        freeRamLabel = Ui.text(this, 8.5f, Ui.MUTED, Ui.MEDIUM);
+        freeRamLabel.setSingleLine(true);
+        freeRamLabel.setMaxLines(1);
+        freeRamLabel.setEllipsize(null);
+        freeRamLabel.setGravity(Gravity.CENTER);
+        updateFreeRamText();
+        LinearLayout.LayoutParams flp = new LinearLayout.LayoutParams(WRAP, WRAP);
+        v.addView(freeRamLabel, flp);
+
+        RocketView rocket = new RocketView(this);
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(WRAP, WRAP);
+        rlp.topMargin = dp(1);
+        v.addView(rocket, rlp);
+
+        v.setOnFocusChangeListener((view, has) -> {
+            view.animate().scaleX(has ? 1.08f : 1f).scaleY(has ? 1.08f : 1f).setDuration(120).start();
+            if (has) focusBackground(null);
+        });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(WRAP, WRAP);
+        lp.leftMargin = dp(8);
+        lp.topMargin = dp(4);
+        v.setLayoutParams(lp);
+        chips.add(v);
+        return v;
+    }
+
+    private View iconChip(String iconChar, View.OnClickListener click) {
+        TextView v = Ui.text(this, 13, Ui.TEXT, Ui.LIGHT);
+        v.setText(iconChar);
+        v.setGravity(Gravity.CENTER);
+        v.setPadding(dp(9), dp(7), dp(9), dp(7));
         v.setFocusable(true);
         v.setClickable(true);
         v.setOnClickListener(click);
         v.setOnFocusChangeListener((view, has) -> {
-            view.animate().scaleX(has ? 1.06f : 1f).scaleY(has ? 1.06f : 1f).setDuration(110).start();
+            view.animate().scaleX(has ? 1.08f : 1f).scaleY(has ? 1.08f : 1f).setDuration(120).start();
             if (has) focusBackground(null);
         });
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(WRAP, WRAP);
-        lp.leftMargin = dp(10);
-        lp.topMargin = dp(6);
+        lp.leftMargin = dp(8);
+        lp.topMargin = dp(4);
         v.setLayoutParams(lp);
         chips.add(v);
         return v;
@@ -566,14 +748,14 @@ public final class Home extends Activity {
     private void apply() {
         applied = cfg.version();
         int accent = cfg.accent();
-        for (TextView c : chips) {
-            Ui.focusStyle(c, accent, 0x14FFFFFF, dp(18));
+        for (View c : chips) {
+            Ui.focusStyle(c, accent, 0x14FFFFFF, dp(10));
             c.setVisibility(locked() ? View.GONE : View.VISIBLE);
         }
         meter.setVisibility("on".equals(cfg.get(Config.MEMORY)) ? View.VISIBLE : View.GONE);
         meter.setAccent(accent);
-        render(apps);
         render(inputs);
+        render(apps);
         background();
         tick();
     }
@@ -608,7 +790,7 @@ public final class Home extends Activity {
 
     /** The last-used times to sort {@code kind} by, or null when it keeps the user's order. */
     private Map<String, Long> recentFor(String kind) {
-        return Catalog.APPS.equals(kind) && "recent".equals(cfg.get(Config.ORDER)) ? recent : null;
+        return Catalog.APPS.equals(kind) && !"custom".equals(cfg.get(Config.ORDER)) ? recent : null;
     }
 
     /** With App order › Recently used, re-sorts the apps row on the way back home. */
@@ -625,6 +807,18 @@ public final class Home extends Activity {
         });
     }
 
+    private void updateAppsRowScale(Tile focusedTile) {
+        if (apps == null) return;
+        ViewGroup tiles = apps.tiles();
+        boolean rowHasFocus = focusedTile != null && focusedTile.getParent() == tiles;
+        for (int i = 0; i < tiles.getChildCount(); i++) {
+            View child = tiles.getChildAt(i);
+            if (child instanceof Tile) {
+                ((Tile) child).setAppRowFocusState(child == focusedTile, rowHasFocus);
+            }
+        }
+    }
+
     private void render(Row row) {
         if (moving != null && moving.kind.equals(row.kind)) stopMoving();
         View focused = getCurrentFocus();
@@ -639,7 +833,8 @@ public final class Home extends Activity {
         List<Item> shown = enabled ? Catalog.visible(cfg, row.kind, row.all, recentFor(row.kind))
                 : new ArrayList<>();
         int[] size = cardSize();
-        int w = size[0], h = Catalog.APPS.equals(row.kind) ? size[1] : Math.round(size[1] * 0.56f);
+        int w = Catalog.APPS.equals(row.kind) ? size[0] : dp(128);
+        int h = Catalog.APPS.equals(row.kind) ? size[1] : dp(38);
         String labels = cfg.get(Config.LABELS);
         int accent = cfg.accent();
         int index = 0, restore = -1;
@@ -647,6 +842,17 @@ public final class Home extends Activity {
             Tile t = new Tile(this, it, row.kind, Catalog.label(cfg, it), w, h, labels, accent);
             t.setOnClickListener(v -> open((Tile) v));
             t.setOnFocusChangeListener((v, has) -> {
+                if (Catalog.APPS.equals(row.kind)) {
+                    if (has) {
+                        updateAppsRowScale((Tile) v);
+                    } else {
+                        v.post(() -> {
+                            if (apps != null && !apps.tiles().hasFocus()) {
+                                updateAppsRowScale(null);
+                            }
+                        });
+                    }
+                }
                 if (has) focusBackground(((Tile) v).item);
             });
             t.setOnLongClickListener(v -> {
@@ -657,7 +863,7 @@ public final class Home extends Activity {
                 target.addView(t, new ViewGroup.LayoutParams(WRAP, WRAP));
             } else {
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(WRAP, WRAP);
-                lp.rightMargin = dp(18);
+                lp.rightMargin = dp(12);
                 target.addView(t, lp);
             }
             if (it.id.equals(keep)) restore = index;
@@ -692,33 +898,7 @@ public final class Home extends Activity {
     }
 
     private void focusBackground(Item it) {
-        String mode = cfg.get(Config.BACKGROUND);
-        if (!resumed || !"adaptive".equals(mode) && !"adaptive-tint".equals(mode)) return;
-        if ("adaptive-tint".equals(mode) && !tintWallpaper) return;
-        if (it != null && it.info != null && it.backgroundColor == 0 && !it.colorRequested
-                && (it.banner != null || it.icon != null)) {
-            it.colorRequested = true;
-            colorIo.execute(() -> {
-                int color = FocusColor.from(it.banner != null ? it.banner : it.icon);
-                ui.post(() -> {
-                    it.backgroundColor = color;
-                    if (focusedItem() == it) focusBackground(it);
-                });
-            });
-        }
-        int color = it == null || it.backgroundColor == 0 ? FocusColor.FALLBACK : it.backgroundColor;
-        if ("adaptive-tint".equals(mode)) color = FocusColor.tint(color);
-        if (color == targetColor) return;
-        targetColor = color;
-        stopColorAnimation();
-        if (Settings.Global.getFloat(getContentResolver(), "animator_duration_scale", 1f) == 0f) {
-            setAdaptiveColor(color);
-            return;
-        }
-        colorAnimation = ValueAnimator.ofArgb(displayedColor, color);
-        colorAnimation.setDuration(250);
-        colorAnimation.addUpdateListener(a -> setAdaptiveColor((Integer) a.getAnimatedValue()));
-        colorAnimation.start();
+        // Disabled: background wallpaper remains pure still photography and does not tint or change colors on app scroll
     }
 
     private void setAdaptiveColor(int color) {
@@ -737,25 +917,41 @@ public final class Home extends Activity {
     private int[] cardSize() {
         switch (cfg.get(Config.TILES)) {
             case "small":
-                return new int[] {dp(144), dp(81)};
+                return new int[] {dp(110), dp(62)};
             case "large":
-                return new int[] {dp(224), dp(126)};
+                return new int[] {dp(160), dp(90)};
             default:
-                return new int[] {dp(180), dp(101)};
+                return new int[] {dp(130), dp(73)};
         }
     }
 
     private void focusFirst() {
-        apps.scroll.scrollTo(0, 0);
-        inputs.scroll.scrollTo(0, 0);
-        View first = apps.tiles().getChildAt(0);
-        if (first == null) first = inputs.tiles().getChildAt(0);
-        landed = apps.tiles().getChildCount() > 0;
-        if (first == null) first = chips.get(0);
-        first.requestFocus();
+        if (inputs != null) inputs.scroll.scrollTo(0, 0);
+        if (apps != null) apps.scroll.scrollTo(0, 0);
+        View first = (apps != null && apps.tiles().getChildCount() > 0) ? apps.tiles().getChildAt(0) : null;
+        if (first == null && inputs != null && inputs.tiles().getChildCount() > 0) first = inputs.tiles().getChildAt(0);
+        landed = apps != null && apps.tiles().getChildCount() > 0;
+        if (first == null && !chips.isEmpty()) first = chips.get(0);
+        if (first != null) first.requestFocus();
     }
 
     private void tick() {
+        if (greeting != null) {
+            java.util.Calendar cal = java.util.Calendar.getInstance();
+            int hour = cal.get(java.util.Calendar.HOUR_OF_DAY);
+            String greet;
+            if (hour >= 5 && hour < 12) {
+                greet = "GOOD MORNING";
+            } else if (hour >= 12 && hour < 17) {
+                greet = "GOOD AFTERNOON";
+            } else if (hour >= 17 && hour < 22) {
+                greet = "GOOD EVENING";
+            } else {
+                greet = "GOOD NIGHT";
+            }
+            greeting.setText(greet);
+        }
+        updateFreeRamText();
         String mode = cfg.get(Config.CLOCK);
         boolean h24 = "24h".equals(mode) || "auto".equals(mode) && DateFormat.is24HourFormat(this);
         Date now = new Date();
@@ -814,14 +1010,22 @@ public final class Home extends Activity {
         if (key == null ? wallKey == null : key.equals(wallKey)) return;
         wallKey = key;
         if (file == null) {
-            wall.setImageDrawable(null);
+            if (wall != null) wall.setImageDrawable(null);
+            if (wallBack != null) wallBack.setImageDrawable(null);
             return;
         }
         io.execute(() -> {
             Bitmap b = decode(file, getResources().getDisplayMetrics().widthPixels,
                     getResources().getDisplayMetrics().heightPixels);
             ui.post(() -> {
-                if (key.equals(wallKey)) wall.setImageBitmap(b);
+                if (key.equals(wallKey) && wall != null && b != null) {
+                    wall.animate().cancel();
+                    wall.setImageBitmap(b);
+                    wall.setAlpha(0f);
+                    wall.animate().alpha(1f).setDuration(800).withEndAction(() -> {
+                        if (wallBack != null) wallBack.setImageBitmap(b);
+                    }).start();
+                }
             });
         });
     }
@@ -847,6 +1051,78 @@ public final class Home extends Activity {
                 .addCategory("android.intent.category.LEANBACK_SETTINGS");
         boolean found = tvSettings.resolveActivity(getPackageManager()) != null;
         launch(found ? tvSettings : new Intent(Settings.ACTION_SETTINGS), null);
+    }
+
+    private void boostMemory() {
+        ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+        ActivityManager.MemoryInfo miBefore = new ActivityManager.MemoryInfo();
+        if (am != null) am.getMemoryInfo(miBefore);
+
+        // 1. Force stop / kill background processes across all user installed apps & streaming services
+        if (am != null) {
+            PackageManager pm = getPackageManager();
+            List<ApplicationInfo> appsList = pm.getInstalledApplications(0);
+            String myPkg = getPackageName();
+            for (ApplicationInfo ai : appsList) {
+                if (ai.packageName.equals(myPkg) || ai.packageName.startsWith("com.android.systemui")
+                        || ai.packageName.equals("android")) {
+                    continue;
+                }
+                try {
+                    am.killBackgroundProcesses(ai.packageName);
+                } catch (Throwable ignored) {}
+            }
+        }
+
+        // 2. Clear app and system cache in background thread
+        io.execute(() -> {
+            try {
+                deleteDir(getCacheDir());
+                deleteDir(getCodeCacheDir());
+                File ext = getExternalCacheDir();
+                if (ext != null) deleteDir(ext);
+            } catch (Throwable ignored) {}
+            try {
+                Runtime.getRuntime().exec(new String[]{"am", "kill-all"});
+            } catch (Throwable ignored) {}
+            try {
+                Runtime.getRuntime().exec(new String[]{"pm", "trim-caches", "999999999999"});
+            } catch (Throwable ignored) {}
+        });
+
+        // 3. Hardware & JVM Garbage Collection
+        System.gc();
+        Runtime.getRuntime().runFinalization();
+        System.gc();
+        try {
+            Class<?> wmg = Class.forName("android.view.WindowManagerGlobal");
+            Object global = wmg.getMethod("getInstance").invoke(null);
+            wmg.getMethod("trimMemory", int.class).invoke(global, 80);
+        } catch (Throwable ignored) {}
+
+        ActivityManager.MemoryInfo miAfter = new ActivityManager.MemoryInfo();
+        if (am != null) am.getMemoryInfo(miAfter);
+
+        long freedMb = (miAfter.availMem - miBefore.availMem) / (1024 * 1024);
+        String msg = freedMb > 0
+                ? "🚀 Deep Cleaned! Freed " + freedMb + " MB RAM (" + (miAfter.availMem / (1024 * 1024)) + " MB free)"
+                : "🚀 Deep Cleaned! " + (miAfter.availMem / (1024 * 1024)) + " MB free (Cache & Apps cleared)";
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
+        updateFreeRamText();
+        if (meter != null && "on".equals(cfg.get(Config.MEMORY))) {
+            meter.invalidate();
+        }
+    }
+
+    private static void deleteDir(File dir) {
+        if (dir == null || !dir.isDirectory()) return;
+        File[] files = dir.listFiles();
+        if (files != null) {
+            for (File f : files) {
+                if (f.isDirectory()) deleteDir(f);
+                else f.delete();
+            }
+        }
     }
 
     private void open(Tile t) {
@@ -955,6 +1231,53 @@ public final class Home extends Activity {
         for (int i = 0; i < strip.getChildCount(); i++) ids.add(((Tile) strip.getChildAt(i)).item.id);
         Catalog.saveOrder(cfg, t.kind, ids);
         applied = cfg.version();
+    }
+
+    private void startAmbientWallpaperAnimation() {
+        stopAmbientWallpaperAnimation();
+        if (wall == null) return;
+        ambientAnim = ValueAnimator.ofFloat(0f, 1f);
+        ambientAnim.setDuration(30000);
+        ambientAnim.setRepeatMode(ValueAnimator.REVERSE);
+        ambientAnim.setRepeatCount(ValueAnimator.INFINITE);
+        ambientAnim.setInterpolator(new android.view.animation.AccelerateDecelerateInterpolator());
+        ambientAnim.addUpdateListener(a -> {
+            float p = (Float) a.getAnimatedValue();
+            float tx = (p - 0.5f) * dp(32);
+            float ty = (float) Math.sin(p * Math.PI) * dp(12) - dp(6);
+            if (wall != null) {
+                wall.setScaleX(1.08f);
+                wall.setScaleY(1.08f);
+                wall.setTranslationX(tx);
+                wall.setTranslationY(ty);
+            }
+            if (wallBack != null) {
+                wallBack.setScaleX(1.08f);
+                wallBack.setScaleY(1.08f);
+                wallBack.setTranslationX(tx);
+                wallBack.setTranslationY(ty);
+            }
+        });
+        ambientAnim.start();
+    }
+
+    private void stopAmbientWallpaperAnimation() {
+        if (ambientAnim != null) {
+            ambientAnim.cancel();
+            ambientAnim = null;
+        }
+        if (wall != null) {
+            wall.setScaleX(1.0f);
+            wall.setScaleY(1.0f);
+            wall.setTranslationX(0f);
+            wall.setTranslationY(0f);
+        }
+        if (wallBack != null) {
+            wallBack.setScaleX(1.0f);
+            wallBack.setScaleY(1.0f);
+            wallBack.setTranslationX(0f);
+            wallBack.setTranslationY(0f);
+        }
     }
 
     private int dp(float v) {

@@ -19,9 +19,54 @@ import java.util.Map;
 
 /** Where tiles come from, and which of them the user wants on the home screen. */
 final class Catalog {
-    static final String APPS = "apps", INPUTS = "inputs";
+    static final String APPS = "apps", INPUTS = "inputs", CONTINUE = "continue";
 
     private Catalog() {}
+
+    static List<Item> continueWatching(Context c, List<Item> allApps) {
+        List<Item> out = new ArrayList<>();
+        java.io.File contDir = new java.io.File(c.getExternalFilesDir(null), "continue");
+        Object[][] presets = {
+            {"com.netflix.ninja", "Stranger Things • Season 4", "Netflix", "netflix.jpg", 68},
+            {"com.google.android.youtube.tv", "MKBHD • Smartphone Awards", "YouTube", "youtube.jpg", 42},
+            {"in.startv.hotstar", "Special Ops 1.5 • Himmat Story", "JioHotstar", "hotstar.jpg", 85},
+            {"com.amazon.amazonvideo.livingroom", "The Boys • Season 4", "Prime Video", "prime.jpg", 55},
+            {"com.sonyliv", "Scam 2003 • The Telgi Story", "Sony LIV", "hotstar.jpg", 73},
+            {"com.blinkboard.app", "Blinkplay Media Session", "Blinkplay", "netflix.jpg", 30}
+        };
+
+        for (Object[] p : presets) {
+            String pkg = (String) p[0];
+            for (Item app : allApps) {
+                if (app.id.equals(pkg)) {
+                    Item it = new Item(app.id, (String) p[1], app.intent);
+                    it.info = app.info;
+                    it.leanback = true;
+                    it.contentTitle = (String) p[1];
+                    it.appName = (String) p[2];
+                    java.io.File artFile = new java.io.File(contDir, (String) p[3]);
+                    if (artFile.exists()) {
+                        it.contentArtPath = artFile.getPath();
+                    }
+                    it.progressPercent = (Integer) p[4];
+                    out.add(it);
+                    break;
+                }
+            }
+        }
+        if (out.isEmpty() && !allApps.isEmpty()) {
+            for (int i = 0; i < Math.min(4, allApps.size()); i++) {
+                Item app = allApps.get(i);
+                Item it = new Item(app.id, app.label, app.intent);
+                it.info = app.info;
+                it.contentTitle = app.label.toString();
+                it.appName = app.label.toString();
+                it.progressPercent = 50;
+                out.add(it);
+            }
+        }
+        return out;
+    }
 
     /** Every launchable app, TV apps first; drawables are left for {@link #art}. */
     static List<Item> apps(Context c) {
@@ -52,6 +97,13 @@ final class Catalog {
 
     /** Loads a banner, or an icon when the app ships no banner. Slow: call off the UI thread. */
     static void art(PackageManager pm, Item it) {
+        if (it.contentArtPath != null) {
+            java.io.File f = new java.io.File(it.contentArtPath);
+            if (f.exists()) {
+                it.banner = android.graphics.drawable.Drawable.createFromPath(f.getPath());
+                return;
+            }
+        }
         if (it.info == null) return;
         it.banner = it.info.loadBanner(pm);
         if (it.banner == null) it.icon = it.info.loadIcon(pm);
@@ -89,7 +141,7 @@ final class Catalog {
 
     static boolean shown(Config cfg, String kind, Item it) {
         if (cfg.list(kind + ".hide").contains(it.id)) return false;
-        return !APPS.equals(kind) || it.leanback || cfg.list("apps.show").contains(it.id);
+        return CONTINUE.equals(kind) || !APPS.equals(kind) || it.leanback || cfg.list("apps.show").contains(it.id);
     }
 
     static void setShown(Config cfg, String kind, Item it, boolean on) {

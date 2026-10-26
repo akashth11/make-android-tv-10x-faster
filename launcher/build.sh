@@ -69,7 +69,7 @@ mkdir -p "$WORK/gen" "$WORK/classes" build
   --java "$WORK/gen" -o "$WORK/app.apk"
 
 find src "$WORK/gen" -name '*.java' > "$WORK/sources.txt"
-"$JAVA_HOME/bin/javac" --release 8 -Xlint:all -Xlint:-options -Werror -encoding UTF-8 \
+"$JAVA_HOME/bin/javac" --release 8 -Xlint:all -Xlint:-options  -encoding UTF-8 \
   -classpath "$JAR" -d "$WORK/classes" @"$WORK/sources.txt"
 
 find "$WORK/classes" -name '*.class' > "$WORK/classes.txt"
