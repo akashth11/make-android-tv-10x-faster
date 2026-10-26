@@ -261,6 +261,8 @@ public final class Home extends Activity {
         updateFreeRamText();
         ui.removeCallbacks(wallpaperCycler);
         ui.postDelayed(wallpaperCycler, 20000);
+        File wDir = new File(cfg.dir, Config.WALLPAPERS);
+        WallpaperFetcher.fetchRandom(this, wDir, () -> ui.post(this::background));
         IntentFilter f = new IntentFilter(Intent.ACTION_TIME_TICK);
         f.addAction(Intent.ACTION_TIME_CHANGED);
         f.addAction(Intent.ACTION_TIMEZONE_CHANGED);
